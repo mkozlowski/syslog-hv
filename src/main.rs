@@ -46,7 +46,7 @@ struct Args {
         short = 'P',
         long = "priority-max",
         value_name = "max priority in a message",
-        default_value_t = 50
+        default_value_t = 191
     )]
     priority_max: u8,
     #[arg(
@@ -63,6 +63,13 @@ struct Args {
         default_value_t = 0
     )]
     words_fixed: u8,
+    #[arg(
+        short = 'c',
+        long = "corrupt",
+        value_name = "number of bytes to be corrupted (changed to 0..=255 randomly)",
+        default_value_t = 0
+    )]
+    corrupt: u8,
 }
 
 #[derive(Debug)]
@@ -99,6 +106,7 @@ struct Options {
     priority_max: u8,
     words_max: u8,
     words_fixed: u8,
+    corrupt: u8,
 }
 
 #[derive(Debug)]
@@ -123,11 +131,11 @@ fn tx_thread(signalled: Arc<AtomicBool>, config: Arc<Config>, stats: Arc<Mutex<S
         let length = if config.options.words_fixed != 0 {
             config.options.words_fixed
         } else {
-            rng.gen_range(1..config.options.words_max)
+            rng.gen_range(1..=config.options.words_max)
         };
 
         let words = rand_word::new(length as usize);
-        let prio = rng.gen_range(0..config.options.priority_max);
+        let prio = rng.gen_range(0..=config.options.priority_max);
         let message = format!("<{prio}> {words}");
 
         messages.push(message);
@@ -142,11 +150,21 @@ fn tx_thread(signalled: Arc<AtomicBool>, config: Arc<Config>, stats: Arc<Mutex<S
 
     loop {
         let idx = rng.gen_range(0..messages.len());
-        let message = &messages[idx];
+        let mut buf: Vec<u8>;
 
-        let bytes = socket
-            .send_to(message.as_bytes(), config.target.as_str())
-            .unwrap();
+        if config.options.corrupt != 0 {
+            buf = messages[idx].clone().into_bytes();
+
+            for _ in 0..std::cmp::min(config.options.corrupt as usize, buf.len()) {
+                let idx = rng.gen_range(0..buf.len());
+
+                buf[idx] = rng.gen_range(0..=255);
+            }
+        } else {
+            buf = messages[idx].as_bytes().to_vec();
+        }
+
+        let bytes = socket.send_to(&buf, config.target.as_str()).unwrap();
 
         tstats.packets += 1;
         tstats.bytes += bytes as u64;
@@ -176,6 +194,11 @@ fn main() {
 
     println!("{:?}", args);
 
+    if args.threads_nr == 0 {
+        eprintln!("at least one tx thread is needed");
+        std::process::exit(1);
+    }
+
     let config = Config {
         target: Target {
             ip: args.target_ip,
@@ -186,6 +209,7 @@ fn main() {
             priority_max: args.priority_max,
             words_max: args.words_max,
             words_fixed: args.words_fixed,
+            corrupt: args.corrupt,
         },
     };
 
